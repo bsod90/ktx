@@ -1,0 +1,32 @@
+[package]
+name = "ktx"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tui = { package = "ratatui", version = "0.21.0", features = ["all-widgets"]}
+clap = "4.2.7"
+crossterm = { version = "0.26.1", features = ["event-stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+shellexpand = "3.1.0"
+kube = { version = "0.82", features = ["config"] }
+tokio = { version = "1.28", features = ["full"] }
+k8s-openapi = { version = "0.18", features = ["v1_26"] }
+log = "0.4.19"
+env_logger = "0.10.0"
+async-trait = "0.1.68"
+futures = "0.3.28"
+chrono = "0.4"
+
+[package.metadata.deb]
+maintainer = "Maksim Leanovich <lm.bsod@gmail.com>"
+license_file = ["LICENSE", "3"]
+depends = "$auto"
+extended_description = """
+Ktx is a Kubernetes config management utility with a terminal user interface.
+"""
+
+[package.metadata.rpm]
+license = "MIT"
+
