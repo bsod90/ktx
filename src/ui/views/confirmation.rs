@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEvent};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
     Frame,
@@ -14,7 +14,8 @@ use crate::ui::{app::AppState, AppView, KtxEvent};
 
 use super::ui_utils::{action_style, key_style};
 
-enum ConfirmationDialogState {
+#[derive(Clone, Copy, Debug)]
+pub enum ConfirmationDialogState {
     Confirm,
     Reject,
     None,
@@ -24,7 +25,6 @@ pub struct ConfirmationDialogView {
     event_bus_tx: mpsc::Sender<KtxEvent>,
     content: String,
     on_confirm_event: KtxEvent,
-    state: Mutex<ConfirmationDialogState>,
 }
 
 impl ConfirmationDialogView {
@@ -34,32 +34,28 @@ impl ConfirmationDialogView {
         on_confirm_event: KtxEvent,
     ) -> Self {
         Self {
-            state: Mutex::new(ConfirmationDialogState::None),
             event_bus_tx,
             content,
             on_confirm_event,
         }
     }
 
-    async fn toggle_state(&self) {
-        let mut state = self.state.lock().await;
-        match *state {
-            ConfirmationDialogState::Confirm => {
-                *state = ConfirmationDialogState::Reject;
-            }
-            ConfirmationDialogState::Reject => {
-                *state = ConfirmationDialogState::Confirm;
-            }
-            _ => {}
+    async fn toggle_state(&self, state: &mut AppState, default: ConfirmationDialogState) {
+        state.confirmation_selection = match state.confirmation_selection {
+            ConfirmationDialogState::Confirm => ConfirmationDialogState::Reject,
+            ConfirmationDialogState::Reject => ConfirmationDialogState::Confirm,
+            _ => default,
         }
     }
 
-    async fn accept(&self) {
+    async fn accept(&self, state: &mut AppState) {
+        state.confirmation_selection = ConfirmationDialogState::None;
         let _ = self.event_bus_tx.send(self.on_confirm_event.clone()).await;
         let _ = self.event_bus_tx.send(KtxEvent::DialogConfirm).await;
     }
 
-    async fn reject(&self) {
+    async fn reject(&self, state: &mut AppState) {
+        state.confirmation_selection = ConfirmationDialogState::None;
         let _ = self.event_bus_tx.send(KtxEvent::DialogReject).await;
     }
 }
@@ -78,7 +74,7 @@ where
         ]))
     }
 
-    fn draw(&self, f: &mut Frame<B>, area: Rect, _state: &mut AppState) {
+    fn draw(&self, f: &mut Frame<B>, area: Rect, state: &mut AppState) {
         let dialog_width = (area.width as f32 * 0.4) as u16;
         let dialog_height = (area.height as f32 * 0.4) as u16;
 
@@ -100,8 +96,27 @@ where
             )
             .split(dialog);
 
-        let yes = Span::styled("Yes", Style::default().fg(Color::Gray));
-        let no = Span::styled("No", Style::default().fg(Color::Gray));
+        //TODO: This part is ugly, refactor it
+
+        let button_style = Style::default().fg(Color::Gray);
+        let selected_button_style = Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::REVERSED);
+
+        let (yes, no) = match state.confirmation_selection {
+            ConfirmationDialogState::Confirm => (
+                Span::styled("Yes", selected_button_style),
+                Span::styled("No", button_style),
+            ),
+            ConfirmationDialogState::Reject => (
+                Span::styled("Yes", button_style),
+                Span::styled("No", selected_button_style),
+            ),
+            _ => (
+                Span::styled("Yes", button_style),
+                Span::styled("No", button_style),
+            ),
+        };
 
         let buttons = Paragraph::new(Line::from(vec![
             yes,
@@ -125,27 +140,47 @@ where
         f.render_widget(buttons, layout[1]);
     }
 
-    async fn handle_event(&self, event: KtxEvent, _state: &mut AppState) -> Result<(), String> {
+    async fn handle_event(&self, event: KtxEvent, state: &mut AppState) -> Result<(), String> {
         match event {
             KtxEvent::TerminalEvent(evt) => match evt {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('y'),
                     ..
                 }) => {
-                    self.accept().await;
+                    self.accept(state).await;
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Esc | KeyCode::Char('n'),
                     ..
                 }) => {
-                    self.reject().await;
+                    self.reject(state).await;
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Left | KeyCode::Right,
+                    code: KeyCode::Left | KeyCode::Char('h'),
                     ..
                 }) => {
-                    self.toggle_state().await;
+                    self.toggle_state(state, ConfirmationDialogState::Confirm)
+                        .await;
                 }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Right | KeyCode::Char('l'),
+                    ..
+                }) => {
+                    self.toggle_state(state, ConfirmationDialogState::Reject)
+                        .await;
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                }) => match state.confirmation_selection {
+                    ConfirmationDialogState::Confirm => {
+                        self.accept(state).await;
+                    }
+                    ConfirmationDialogState::Reject => {
+                        self.reject(state).await;
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
             _ => {}

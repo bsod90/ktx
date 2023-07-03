@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 use crossterm::event;
 // use env_logger::{self, Builder};
 use futures::StreamExt;
-// use log::{error, LevelFilter};
+use log::{error, LevelFilter};
 use std::{io, io::Write, sync::Arc};
 use tokio::sync::mpsc;
 use tui::{backend::CrosstermBackend, Terminal};

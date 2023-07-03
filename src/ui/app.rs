@@ -1,3 +1,4 @@
+use crate::ui::views::confirmation::ConfirmationDialogState;
 use crate::ui::views::confirmation::ConfirmationDialogView;
 use crate::ui::views::list::ContextListView;
 use crate::ui::{KtxEvent, KubeContextStatus, RendererMessage};
@@ -28,15 +29,26 @@ where
     async fn handle_event(&self, event: KtxEvent, state: &mut AppState) -> Result<(), String>;
 }
 
+// I couldn't find an elegant way to each view's state across the sync/async boundary.
+// Hence, for now, all mutable stuff is combined into one big struct and shared with all views.
+// This is not ideal, but it works, and I'll revisit this later.
+// The core issue that even handling is async, but view rendering is sync,
+// becuse terminal.draw(||) accepts a sync callback.
 #[derive(Debug, Clone)]
 pub struct AppState {
+    // Main view state
     pub is_filter_on: bool,
     pub filter: String,
     pub kubeconfig: Kubeconfig,
     pub kubeconfig_path: String,
     pub connectivity_status: std::collections::HashMap<String, KubeContextStatus>,
+
+    // Context list view state
     pub main_list_state: ListState,
     pub remembered_g: bool,
+
+    // Confirmation dialog state
+    pub confirmation_selection: ConfirmationDialogState,
 }
 
 pub struct KtxApp<B: Backend + Send + Sync> {
@@ -87,9 +99,10 @@ where
                 is_filter_on: false,
                 kubeconfig_path,
                 connectivity_status: std::collections::HashMap::new(),
+                kubeconfig,
                 main_list_state: ListState::default(),
                 remembered_g: false,
-                kubeconfig,
+                confirmation_selection: ConfirmationDialogState::None,
             })),
             event_bus_tx,
             view_stack: Arc::new(Mutex::new(Vec::new())),
