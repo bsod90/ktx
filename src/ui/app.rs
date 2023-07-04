@@ -1,6 +1,5 @@
-use crate::ui::views::confirmation::ConfirmationDialogState;
-use crate::ui::views::confirmation::ConfirmationDialogView;
-use crate::ui::views::list::ContextListView;
+use crate::ui::views::confirmation::{ConfirmationDialogView, ConfirmationDialogViewState};
+use crate::ui::views::list::{ContextListView, ContextListViewState};
 use crate::ui::{KtxEvent, KubeContextStatus, RendererMessage};
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
@@ -16,39 +15,37 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use tui::layout::{Alignment, Constraint, Direction, Layout};
 use tui::style::{Color, Style};
-use tui::widgets::{Block, Borders, ListState, Paragraph, Wrap};
+use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::{backend::Backend, layout::Rect, Frame};
+
+pub enum ViewState {
+    ContextListView(ContextListViewState),
+    ConfirmationDialogView(ConfirmationDialogViewState),
+}
 
 #[async_trait]
 pub trait AppView<B>
 where
     B: Backend + Sync + Send,
 {
-    fn draw(&self, f: &mut Frame<B>, area: Rect, state: &mut AppState);
-    fn draw_top_bar(&self, state: &mut AppState) -> Paragraph<'_>;
-    async fn handle_event(&self, event: KtxEvent, state: &mut AppState) -> Result<(), String>;
+    fn draw(&self, f: &mut Frame<B>, area: Rect, state: &AppState, view_state: &mut ViewState);
+    fn draw_top_bar(&self, state: &AppState) -> Paragraph<'_>;
+    async fn handle_event(
+        &self,
+        event: KtxEvent,
+        state: &AppState,
+        view_state: &mut ViewState,
+    ) -> Result<(), String>;
+    fn get_state_mutex(&self) -> Arc<Mutex<ViewState>>;
 }
 
-// I couldn't find an elegant way to each view's state across the sync/async boundary.
-// Hence, for now, all mutable stuff is combined into one big struct and shared with all views.
-// This is not ideal, but it works, and I'll revisit this later.
-// The core issue that even handling is async, but view rendering is sync,
-// becuse terminal.draw(||) accepts a sync callback.
 #[derive(Debug, Clone)]
 pub struct AppState {
-    // Main view state
     pub is_filter_on: bool,
     pub filter: String,
     pub kubeconfig: Kubeconfig,
     pub kubeconfig_path: String,
     pub connectivity_status: std::collections::HashMap<String, KubeContextStatus>,
-
-    // Context list view state
-    pub main_list_state: ListState,
-    pub remembered_g: bool,
-
-    // Confirmation dialog state
-    pub confirmation_selection: ConfirmationDialogState,
 }
 
 pub struct KtxApp<B: Backend + Send + Sync> {
@@ -100,9 +97,6 @@ where
                 kubeconfig_path,
                 connectivity_status: std::collections::HashMap::new(),
                 kubeconfig,
-                main_list_state: ListState::default(),
-                remembered_g: false,
-                confirmation_selection: ConfirmationDialogState::None,
             })),
             event_bus_tx,
             view_stack: Arc::new(Mutex::new(Vec::new())),
@@ -112,7 +106,7 @@ where
 
     pub async fn start(&self) {
         let mut view_stack = self.view_stack.lock().await;
-        self.state.lock().await.main_list_state.select(Some(0));
+        // self.state.lock().await.main_list_state.select(Some(0));
         view_stack.push(Box::new(ContextListView::new::<B>(
             self.event_bus_tx.clone(),
         )));
@@ -204,6 +198,8 @@ where
     ) -> Result<(), String> {
         let view_stack = self.view_stack.lock().await;
         let current_view = view_stack.last().unwrap();
+        let view_state_mutex = current_view.get_state_mutex();
+        let mut current_view_state = view_state_mutex.lock().await;
         match event {
             Event::Key(KeyEvent { code, .. }) => {
                 if state.is_filter_on {
@@ -215,7 +211,11 @@ where
                         }
                         _ => {
                             let _ = current_view
-                                .handle_event(KtxEvent::TerminalEvent(event), state)
+                                .handle_event(
+                                    KtxEvent::TerminalEvent(event),
+                                    state,
+                                    &mut current_view_state,
+                                )
                                 .await;
                         }
                     }
@@ -223,7 +223,11 @@ where
             }
             _ => {
                 let _ = current_view
-                    .handle_event(KtxEvent::TerminalEvent(event), state)
+                    .handle_event(
+                        KtxEvent::TerminalEvent(event),
+                        state,
+                        &mut current_view_state,
+                    )
                     .await;
             }
         };
@@ -273,7 +277,12 @@ where
             }
             _ => {
                 let view_stack = self.view_stack.lock().await;
-                let _ = view_stack.last().unwrap().handle_event(event, state).await;
+                let current_view = view_stack.last().unwrap();
+                let view_state_mutex = current_view.get_state_mutex();
+                let mut current_view_state = view_state_mutex.lock().await;
+                let _ = current_view
+                    .handle_event(event, state, &mut current_view_state)
+                    .await;
             }
         };
         Ok(())
@@ -296,9 +305,13 @@ where
                     let mut state = self.state.lock().await;
                     let view_stack = self.view_stack.lock().await;
                     let current_view = view_stack.last().unwrap();
+                    let state_mutex = current_view.get_state_mutex();
+                    let mut view_state = state_mutex.lock().await;
                     let mut terminal = self.terminal.lock().await;
                     terminal
-                        .draw(move |f| self.draw(f, f.size(), &mut state, current_view))
+                        .draw(move |f| {
+                            self.draw(f, f.size(), &mut state, current_view, &mut view_state)
+                        })
                         .expect("Unable to draw terminal");
                 }
                 Some(RendererMessage::Stop) | None => {
@@ -338,6 +351,7 @@ where
         _area: Rect,
         state: &mut AppState,
         current_view: &Box<dyn AppView<B> + Send + Sync>,
+        view_state: &mut ViewState,
     ) {
         let size = f.size();
         let layout = Layout::default()
@@ -346,7 +360,7 @@ where
             .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
             .split(size);
         self.draw_top_bar(f, layout[0], state, current_view);
-        current_view.draw(f, layout[1], state);
+        current_view.draw(f, layout[1], state, view_state);
     }
 
     pub async fn handle_event(&self, event: KtxEvent) -> Result<(), String> {

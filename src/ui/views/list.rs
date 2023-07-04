@@ -1,29 +1,55 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use kube::config::NamedContext;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tui::{
     backend::Backend,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
-use crate::ui::app::{AppState, AppView};
+use crate::ui::app::{AppState, AppView, ViewState};
 use crate::ui::types::{KtxEvent, KubeContextStatus};
 use crate::ui::views::ui_utils::{action_style, key_style};
 
+pub struct ContextListViewState {
+    pub list_state: ListState,
+    pub remembered_g: bool,
+}
+
+impl ContextListViewState {
+    pub fn from(state: &mut ViewState) -> &mut Self {
+        if let ViewState::ContextListView(state) = state {
+            state
+        } else {
+            panic!("Invalid ViewState passed to ContextListView");
+        }
+    }
+}
+
 pub struct ContextListView {
     event_bus_tx: mpsc::Sender<KtxEvent>,
+    state: Arc<Mutex<ViewState>>,
 }
 
 const STATUS_PADDING: usize = 10;
 
 impl ContextListView {
     pub fn new<B: Backend>(event_bus_tx: mpsc::Sender<KtxEvent>) -> Self {
-        Self { event_bus_tx }
+        let mut state = ContextListViewState {
+            list_state: ListState::default(),
+            remembered_g: false,
+        };
+        state.list_state.select(Some(0));
+        Self {
+            event_bus_tx,
+            state: Arc::new(Mutex::new(ViewState::ContextListView(state))),
+        }
     }
 
     async fn send_event(&self, event: KtxEvent) {
@@ -33,9 +59,10 @@ impl ContextListView {
     async fn handle_list_navigation(
         &self,
         event: Event,
-        state: &mut AppState,
+        state: &AppState,
+        view_state: &mut ContextListViewState,
     ) -> Result<(), String> {
-        let list_state = &state.main_list_state;
+        let list_state = &view_state.list_state;
         let filtered_contexts = state.get_filtered_contexts();
         match event {
             Event::Key(KeyEvent {
@@ -54,11 +81,13 @@ impl ContextListView {
                     let _ = self.send_event(KtxEvent::ListPageDown).await;
                 }
                 (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
-                    if (code == KeyCode::Char('g') && state.remembered_g) || code == KeyCode::Home {
-                        state.remembered_g = false;
+                    if (code == KeyCode::Char('g') && view_state.remembered_g)
+                        || code == KeyCode::Home
+                    {
+                        view_state.remembered_g = false;
                         self.send_event(KtxEvent::ListTop).await;
                     } else {
-                        state.remembered_g = true;
+                        view_state.remembered_g = true;
                     }
                 }
                 (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
@@ -86,7 +115,7 @@ impl ContextListView {
                     self.send_event(KtxEvent::TestConnections).await;
                 }
                 _ => {
-                    state.remembered_g = false;
+                    view_state.remembered_g = false;
                 }
             },
             _ => {}
@@ -97,10 +126,11 @@ impl ContextListView {
     async fn handle_list_navigation_event(
         &self,
         event: KtxEvent,
-        state: &mut AppState,
+        state: &AppState,
+        view_state: &mut ContextListViewState,
     ) -> Result<(), String> {
         let filtered_contexts = state.get_filtered_contexts();
-        let list_state = &mut state.main_list_state;
+        let list_state = &mut view_state.list_state;
         match event {
             KtxEvent::ListSelect(pos) => {
                 list_state.select(Some(pos));
@@ -147,7 +177,12 @@ impl ContextListView {
         Ok(())
     }
 
-    async fn handle_app_event(&self, event: KtxEvent, state: &mut AppState) -> Result<(), String> {
+    async fn handle_app_event(
+        &self,
+        event: KtxEvent,
+        state: &AppState,
+        view_state: &mut ContextListViewState,
+    ) -> Result<(), String> {
         match event {
             KtxEvent::ListSelect(_)
             | KtxEvent::ListOneUp
@@ -156,7 +191,9 @@ impl ContextListView {
             | KtxEvent::ListPageDown
             | KtxEvent::ListTop
             | KtxEvent::ListBottom => {
-                let _ = self.handle_list_navigation_event(event, state).await;
+                let _ = self
+                    .handle_list_navigation_event(event, state, view_state)
+                    .await;
             }
             _ => {}
         };
@@ -166,7 +203,8 @@ impl ContextListView {
     fn render_context(
         &self,
         c: &(NamedContext, KubeContextStatus),
-        state: &mut AppState,
+        state: &AppState,
+        view_state: &mut ContextListViewState,
         area: &Rect,
     ) -> ListItem {
         let title = if state.is_current_context(&c.0) {
@@ -204,7 +242,11 @@ impl<B> AppView<B> for ContextListView
 where
     B: Backend + Sync + Send,
 {
-    fn draw_top_bar(&self, _state: &mut AppState) -> Paragraph<'_> {
+    fn get_state_mutex(&self) -> Arc<Mutex<ViewState>> {
+        self.state.clone()
+    }
+
+    fn draw_top_bar(&self, _state: &AppState) -> Paragraph<'_> {
         Paragraph::new(Line::from(vec![
             key_style("jk".to_string()),
             action_style(" - up/down, ".to_string()),
@@ -221,11 +263,12 @@ where
         ]))
     }
 
-    fn draw(&self, f: &mut Frame<B>, area: Rect, state: &mut AppState) {
+    fn draw(&self, f: &mut Frame<B>, area: Rect, state: &AppState, view_state: &mut ViewState) {
+        let view_state = ContextListViewState::from(view_state);
         let items: Vec<ListItem> = state
             .get_filtered_contexts()
             .iter()
-            .map(|c| self.render_context(c, state, &area))
+            .map(|c| self.render_context(c, state, view_state, &area))
             .collect();
 
         let list = List::new(items)
@@ -237,16 +280,22 @@ where
             )
             .highlight_symbol("> ");
 
-        f.render_stateful_widget(list, area, &mut state.main_list_state);
+        f.render_stateful_widget(list, area, &mut view_state.list_state);
     }
 
-    async fn handle_event(&self, event: KtxEvent, state: &mut AppState) -> Result<(), String> {
+    async fn handle_event(
+        &self,
+        event: KtxEvent,
+        state: &AppState,
+        view_state: &mut ViewState,
+    ) -> Result<(), String> {
+        let view_state = ContextListViewState::from(view_state);
         match event {
             KtxEvent::TerminalEvent(evt) => {
-                let _ = self.handle_list_navigation(evt, state).await;
+                let _ = self.handle_list_navigation(evt, state, view_state).await;
             }
             _ => {
-                let _ = self.handle_app_event(event, state).await;
+                let _ = self.handle_app_event(event, state, view_state).await;
             }
         };
         Ok(())
