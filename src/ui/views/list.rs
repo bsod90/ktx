@@ -13,23 +13,13 @@ use tui::{
     Frame,
 };
 
-use crate::ui::app::{AppState, AppView, ViewState};
-use crate::ui::types::{KtxEvent, KubeContextStatus};
+use crate::ui::app::{AppState, AppView};
+use crate::ui::types::{KtxEvent, KubeContextStatus, ViewState};
 use crate::ui::views::ui_utils::{action_style, key_style};
 
 pub struct ContextListViewState {
     pub list_state: ListState,
     pub remembered_g: bool,
-}
-
-impl ContextListViewState {
-    pub fn from(state: &mut ViewState) -> &mut Self {
-        if let ViewState::ContextListView(state) = state {
-            state
-        } else {
-            panic!("Invalid ViewState passed to ContextListView");
-        }
-    }
 }
 
 pub struct ContextListView {
@@ -204,7 +194,6 @@ impl ContextListView {
         &self,
         c: &(NamedContext, KubeContextStatus),
         state: &AppState,
-        view_state: &mut ContextListViewState,
         area: &Rect,
     ) -> ListItem {
         let title = if state.is_current_context(&c.0) {
@@ -248,27 +237,27 @@ where
 
     fn draw_top_bar(&self, _state: &AppState) -> Paragraph<'_> {
         Paragraph::new(Line::from(vec![
-            key_style("jk".to_string()),
-            action_style(" - up/down, ".to_string()),
-            key_style("Enter".to_string()),
-            action_style(" - select, ".to_string()),
-            key_style("Esc".to_string()),
-            action_style(" - quit, ".to_string()),
-            key_style("t".to_string()),
-            action_style(" - test, ".to_string()),
-            key_style("d".to_string()),
-            action_style(" - delete, ".to_string()),
-            key_style("i".to_string()),
-            action_style(" - import".to_string()),
+            key_style("jk"),
+            action_style(" - up/down, "),
+            key_style("Enter"),
+            action_style(" - select, "),
+            key_style("Esc"),
+            action_style(" - quit, "),
+            key_style("t"),
+            action_style(" - test, "),
+            key_style("d"),
+            action_style(" - delete, "),
+            key_style("i"),
+            action_style(" - import"),
         ]))
     }
 
     fn draw(&self, f: &mut Frame<B>, area: Rect, state: &AppState, view_state: &mut ViewState) {
-        let view_state = ContextListViewState::from(view_state);
+        let view_state = ContextListViewState::from_view_state(view_state);
         let items: Vec<ListItem> = state
             .get_filtered_contexts()
             .iter()
-            .map(|c| self.render_context(c, state, view_state, &area))
+            .map(|c| self.render_context(c, state, &area))
             .collect();
 
         let list = List::new(items)
@@ -289,7 +278,7 @@ where
         state: &AppState,
         view_state: &mut ViewState,
     ) -> Result<(), String> {
-        let view_state = ContextListViewState::from(view_state);
+        let view_state = ContextListViewState::from_view_state(view_state);
         match event {
             KtxEvent::TerminalEvent(evt) => {
                 let _ = self.handle_list_navigation(evt, state, view_state).await;

@@ -1,5 +1,6 @@
-use crate::ui::views::confirmation::{ConfirmationDialogView, ConfirmationDialogViewState};
-use crate::ui::views::list::{ContextListView, ContextListViewState};
+use crate::ui::types::ViewState;
+use crate::ui::views::confirmation::ConfirmationDialogView;
+use crate::ui::views::list::ContextListView;
 use crate::ui::{KtxEvent, KubeContextStatus, RendererMessage};
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
@@ -17,11 +18,6 @@ use tui::layout::{Alignment, Constraint, Direction, Layout};
 use tui::style::{Color, Style};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::{backend::Backend, layout::Rect, Frame};
-
-pub enum ViewState {
-    ContextListView(ContextListViewState),
-    ConfirmationDialogView(ConfirmationDialogViewState),
-}
 
 #[async_trait]
 pub trait AppView<B>

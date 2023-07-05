@@ -12,10 +12,7 @@ use tui::{
     Frame,
 };
 
-use crate::ui::{
-    app::{AppState, ViewState},
-    AppView, KtxEvent,
-};
+use crate::ui::{app::AppState, types::ViewState, AppView, KtxEvent};
 
 use super::ui_utils::{action_style, key_style, styled_button};
 
@@ -35,16 +32,6 @@ pub struct ConfirmationDialogView {
 
 pub struct ConfirmationDialogViewState {
     pub selection: ConfirmationDialogSelection,
-}
-
-impl ConfirmationDialogViewState {
-    pub fn from(state: &mut ViewState) -> &mut Self {
-        if let ViewState::ConfirmationDialogView(state) = state {
-            state
-        } else {
-            panic!("Invalid ViewState passed to ConfirmationDialogViewState")
-        }
-    }
 }
 
 impl ConfirmationDialogView {
@@ -100,15 +87,15 @@ where
 
     fn draw_top_bar(&self, _state: &AppState) -> Paragraph<'_> {
         Paragraph::new(Line::from(vec![
-            key_style("y".to_string()),
-            action_style(" - yes, ".to_string()),
-            key_style("Esc, n".to_string()),
-            action_style(" - no, ".to_string()),
+            key_style("y"),
+            action_style(" - yes, "),
+            key_style("Esc, n"),
+            action_style(" - no, "),
         ]))
     }
 
     fn draw(&self, f: &mut Frame<B>, area: Rect, _state: &AppState, view_state: &mut ViewState) {
-        let state = ConfirmationDialogViewState::from(view_state);
+        let state = ConfirmationDialogViewState::from_view_state(view_state);
         let dialog_width = (area.width as f32 * 0.4) as u16;
         let dialog_height = (area.height as f32 * 0.4) as u16;
 
@@ -167,7 +154,7 @@ where
         state: &AppState,
         view_state: &mut ViewState,
     ) -> Result<(), String> {
-        let view_state = ConfirmationDialogViewState::from(view_state);
+        let view_state = ConfirmationDialogViewState::from_view_state(view_state);
         match event {
             KtxEvent::TerminalEvent(evt) => match evt {
                 Event::Key(KeyEvent {
