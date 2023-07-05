@@ -151,9 +151,9 @@ where
     async fn handle_event(
         &self,
         event: KtxEvent,
-        state: &AppState,
+        _state: &AppState,
         view_state: &mut ViewState,
-    ) -> Result<(), String> {
+    ) -> Option<KtxEvent> {
         let view_state = ConfirmationDialogViewState::from_view_state(view_state);
         match event {
             KtxEvent::TerminalEvent(evt) => match evt {
@@ -193,12 +193,18 @@ where
                     ConfirmationDialogSelection::Reject => {
                         self.reject(view_state).await;
                     }
-                    _ => {}
+                    _ => {
+                        return Some(KtxEvent::TerminalEvent(evt));
+                    }
                 },
-                _ => {}
+                _ => {
+                    return Some(KtxEvent::TerminalEvent(evt));
+                }
             },
-            _ => {}
-        }
-        Ok(())
+            _ => {
+                return Some(event);
+            }
+        };
+        None
     }
 }

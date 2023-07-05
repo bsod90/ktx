@@ -11,6 +11,7 @@ use kube::{Client, Config};
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
@@ -31,7 +32,7 @@ where
         event: KtxEvent,
         state: &AppState,
         view_state: &mut ViewState,
-    ) -> Result<(), String>;
+    ) -> Option<KtxEvent>;
     fn get_state_mutex(&self) -> Arc<Mutex<ViewState>>;
 }
 
@@ -102,7 +103,6 @@ where
 
     pub async fn start(&self) {
         let mut view_stack = self.view_stack.lock().await;
-        // self.state.lock().await.main_list_state.select(Some(0));
         view_stack.push(Box::new(ContextListView::new::<B>(
             self.event_bus_tx.clone(),
         )));
@@ -113,58 +113,44 @@ where
         let contexts = state.kubeconfig.contexts.clone();
         let event_bus = self.event_bus_tx.clone();
         tokio::spawn(async move {
-            let handles: Vec<_> = contexts
-                .iter()
-                .map(|context| {
-                    let kubeconfig = kubeconfig.clone();
-                    let event_bus = event_bus.clone();
-                    let context = context.clone();
-                    tokio::spawn(async move {
-                        let name = context.name.clone();
-                        let options = KubeConfigOptions {
-                            context: Some(name.clone()),
-                            cluster: None,
-                            user: None,
-                        };
+            let mut handles: Vec<_> = vec![];
+            for context in contexts {
+                let kubeconfig = kubeconfig.clone();
+                let event_bus = event_bus.clone();
+                let context = context.clone();
+                let handle = tokio::spawn(async move {
+                    let name = context.name.clone();
+                    let options = KubeConfigOptions {
+                        context: Some(name.clone()),
+                        cluster: None,
+                        user: None,
+                    };
+                    let status = match async {
                         let config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options)
                             .await
                             .unwrap();
-                        let client = match Client::try_from(config) {
-                            Ok(client) => client,
-                            Err(_) => {
-                                let _ = event_bus
-                                    .send(KtxEvent::SetConnectivityStatus((
-                                        name,
-                                        KubeContextStatus::Unhealthy,
-                                    )))
-                                    .await;
-                                return;
-                            }
-                        };
-                        match client.apiserver_version().await {
-                            Ok(version) => {
-                                let _ = event_bus
-                                    .send(KtxEvent::SetConnectivityStatus((
-                                        name,
-                                        KubeContextStatus::Healthy(format!(
-                                            "{}.{}",
-                                            version.major, version.minor
-                                        )),
-                                    )))
-                                    .await;
-                            }
-                            Err(_) => {
-                                let _ = event_bus
-                                    .send(KtxEvent::SetConnectivityStatus((
-                                        name,
-                                        KubeContextStatus::Unhealthy,
-                                    )))
-                                    .await;
-                            }
-                        };
-                    })
-                })
-                .collect();
+                        let client = Client::try_from(config)?;
+                        client.apiserver_version().await
+                    }
+                    .await
+                    {
+                        Ok(version) => KtxEvent::SetConnectivityStatus((
+                            name,
+                            KubeContextStatus::Healthy(format!(
+                                "{}.{}",
+                                version.major, version.minor
+                            )),
+                        )),
+                        Err(_) => {
+                            KtxEvent::SetConnectivityStatus((name, KubeContextStatus::Unhealthy))
+                        }
+                    };
+                    let _ = event_bus.send(status).await;
+                });
+                handles.push(handle);
+                // Let the eventloop chill for a bit to avoid freezing the UI
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
             futures::stream::iter(handles)
                 .buffer_unordered(10)
                 .collect::<Vec<_>>()
@@ -187,101 +173,81 @@ where
         };
     }
 
-    async fn handle_terminal_event(
-        &self,
-        event: Event,
-        state: &mut AppState,
-    ) -> Result<(), String> {
+    async fn propagate_event(&self, event: KtxEvent, state: &mut AppState) -> Option<KtxEvent> {
         let view_stack = self.view_stack.lock().await;
         let current_view = view_stack.last().unwrap();
         let view_state_mutex = current_view.get_state_mutex();
         let mut current_view_state = view_state_mutex.lock().await;
-        match event {
-            Event::Key(KeyEvent { code, .. }) => {
-                if state.is_filter_on {
-                    self.handle_filter_on_navigation(code, state).await;
-                } else {
-                    match code {
-                        event::KeyCode::Char('/') => {
-                            let _ = self.event_bus_tx.send(KtxEvent::EnterFilterMode).await;
-                        }
-                        _ => {
-                            let _ = current_view
-                                .handle_event(
-                                    KtxEvent::TerminalEvent(event),
-                                    state,
-                                    &mut current_view_state,
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
-            _ => {
-                let _ = current_view
-                    .handle_event(
-                        KtxEvent::TerminalEvent(event),
-                        state,
-                        &mut current_view_state,
-                    )
-                    .await;
-            }
-        };
-        Ok(())
+        current_view
+            .handle_event(event, state, &mut current_view_state)
+            .await
     }
 
-    async fn handle_app_event(&self, event: KtxEvent, state: &mut AppState) -> Result<(), String> {
+    async fn handle_terminal_event(&self, event: Event, state: &mut AppState) {
         match event {
-            KtxEvent::ExitFilterMode => {
-                state.is_filter_on = false;
+            // "Inversed" event handling order because filter is technically in focus and should
+            // handle events before any other view
+            Event::Key(KeyEvent { code, .. }) if state.is_filter_on => {
+                self.handle_filter_on_navigation(code, state).await;
             }
-            KtxEvent::EnterFilterMode => {
-                state.is_filter_on = true;
-            }
-            KtxEvent::TestConnections => {
-                self.test_connections(state).await;
-            }
-            KtxEvent::SetConnectivityStatus((name, status)) => {
-                state.connectivity_status.insert(name, status);
-            }
-            KtxEvent::DeleteContext(name) => {
-                let mut view_stack = self.view_stack.lock().await;
-                view_stack.push(Box::new(ConfirmationDialogView::new::<B>(
-                    self.event_bus_tx.clone(),
-                    format!(
-                        "Are you sure you want to delete\n\n{}\n\nfrom your kubeconfig file?",
-                        name
-                    ),
-                    KtxEvent::DeleteContextConfirm(name),
-                )));
-            }
-            KtxEvent::PopView | KtxEvent::DialogReject | KtxEvent::DialogConfirm => {
-                let mut view_stack = self.view_stack.lock().await;
-                if view_stack.len() > 1 {
-                    view_stack.pop();
-                } else {
-                    let _ = self.event_bus_tx.send(KtxEvent::Exit).await;
-                }
-            }
-            KtxEvent::DeleteContextConfirm(name) => {
-                state.kubeconfig.contexts.retain(|c| c.name != name);
-                self.write_kubeconfig(state).await.unwrap();
-            }
-            KtxEvent::SetContext(name) => {
-                state.kubeconfig.current_context = Some(name);
-                self.write_kubeconfig(state).await.unwrap();
+            Event::Key(KeyEvent {
+                code: event::KeyCode::Char('/'),
+                ..
+            }) if !state.is_filter_on => {
+                let _ = self.event_bus_tx.send(KtxEvent::EnterFilterMode).await;
             }
             _ => {
-                let view_stack = self.view_stack.lock().await;
-                let current_view = view_stack.last().unwrap();
-                let view_state_mutex = current_view.get_state_mutex();
-                let mut current_view_state = view_state_mutex.lock().await;
-                let _ = current_view
-                    .handle_event(event, state, &mut current_view_state)
+                self.propagate_event(KtxEvent::TerminalEvent(event), state)
                     .await;
             }
+        }
+    }
+
+    async fn handle_app_event(&self, event: KtxEvent, state: &mut AppState) {
+        if let Some(event) = self.propagate_event(event, state).await {
+            match event {
+                KtxEvent::ExitFilterMode => {
+                    state.is_filter_on = false;
+                }
+                KtxEvent::EnterFilterMode => {
+                    state.is_filter_on = true;
+                }
+                KtxEvent::TestConnections => {
+                    self.test_connections(state).await;
+                }
+                KtxEvent::SetConnectivityStatus((name, status)) => {
+                    state.connectivity_status.insert(name, status);
+                }
+                KtxEvent::DeleteContext(name) => {
+                    let mut view_stack = self.view_stack.lock().await;
+                    view_stack.push(Box::new(ConfirmationDialogView::new::<B>(
+                        self.event_bus_tx.clone(),
+                        format!(
+                            "Are you sure you want to delete\n\n{}\n\nfrom your kubeconfig file?",
+                            name
+                        ),
+                        KtxEvent::DeleteContextConfirm(name),
+                    )));
+                }
+                KtxEvent::PopView | KtxEvent::DialogReject | KtxEvent::DialogConfirm => {
+                    let mut view_stack = self.view_stack.lock().await;
+                    if view_stack.len() > 1 {
+                        view_stack.pop();
+                    } else {
+                        let _ = self.event_bus_tx.send(KtxEvent::Exit).await;
+                    }
+                }
+                KtxEvent::DeleteContextConfirm(name) => {
+                    state.kubeconfig.contexts.retain(|c| c.name != name);
+                    self.write_kubeconfig(state).await.unwrap();
+                }
+                KtxEvent::SetContext(name) => {
+                    state.kubeconfig.current_context = Some(name);
+                    self.write_kubeconfig(state).await.unwrap();
+                }
+                _ => {}
+            };
         };
-        Ok(())
     }
 
     pub async fn start_renderer(&self, mut rx: mpsc::Receiver<RendererMessage>) -> () {
@@ -359,7 +325,7 @@ where
         current_view.draw(f, layout[1], state, view_state);
     }
 
-    pub async fn handle_event(&self, event: KtxEvent) -> Result<(), String> {
+    pub async fn handle_event(&self, event: KtxEvent) {
         let mut state = self.state.lock().await;
         match event {
             KtxEvent::TerminalEvent(evt) => self.handle_terminal_event(evt, &mut state).await,

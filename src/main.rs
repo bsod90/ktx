@@ -50,38 +50,43 @@ async fn main() {
     let (renderer_tx, renderer_rx) = mpsc::channel(1024);
     let (event_bus_tx, mut event_bus_rx) = mpsc::channel(1024);
     let app = Arc::new(KtxApp::new(config_path.clone(), terminal, event_bus_tx));
-    let app_clone = app.clone();
 
     app.start().await;
 
-    let renderer = tokio::spawn(async move {
-        app_clone.start_renderer(renderer_rx).await;
+    let renderer = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.start_renderer(renderer_rx).await;
+        }
     });
 
-    let event_handler = tokio::spawn(async move {
-        let mut reader = event::EventStream::new();
-        loop {
-            renderer_tx.send(RendererMessage::Render).await.unwrap();
-            tokio::select! {
-                terminal_event = reader.next() => {
-                    let evt = terminal_event.expect("Failed to read event").unwrap();
-                    app.handle_event(KtxEvent::TerminalEvent(evt)).await.unwrap();
-                },
-                app_event = event_bus_rx.recv() => {
-                    let evt = app_event.expect("Failed to read event");
-                    match evt {
-                        KtxEvent::Exit => {
-                            break;
-                        },
-                        _ => {
-                            app.handle_event(evt).await.unwrap();
-                        },
-                    }
-                },
+    let event_handler = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let mut reader = event::EventStream::new();
+            loop {
+                renderer_tx.send(RendererMessage::Render).await.unwrap();
+                tokio::select! {
+                    terminal_event = reader.next() => {
+                        let evt = terminal_event.expect("Failed to read event").unwrap();
+                        app.handle_event(KtxEvent::TerminalEvent(evt)).await;
+                    },
+                    app_event = event_bus_rx.recv() => {
+                        let evt = app_event.expect("Failed to read event");
+                        match evt {
+                            KtxEvent::Exit => {
+                                break;
+                            },
+                            _ => {
+                                app.handle_event(evt).await;
+                            },
+                        }
+                    },
+                }
             }
+            renderer_tx.send(RendererMessage::Stop).await.unwrap();
         }
-        renderer_tx.send(RendererMessage::Stop).await.unwrap();
-        app.shutdown().await;
     });
     let (_, _) = tokio::join!(renderer, event_handler);
+    app.shutdown().await;
 }

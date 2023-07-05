@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent};
 use kube::config::NamedContext;
 use tokio::sync::{mpsc, Mutex};
 use tui::{
@@ -15,7 +15,9 @@ use tui::{
 
 use crate::ui::app::{AppState, AppView};
 use crate::ui::types::{KtxEvent, KubeContextStatus, ViewState};
-use crate::ui::views::ui_utils::{action_style, key_style};
+use crate::ui::views::ui_utils::{
+    action_style, handle_list_app_event, handle_list_navigation_keyboard_event, key_style,
+};
 
 pub struct ContextListViewState {
     pub list_state: ListState,
@@ -46,125 +48,56 @@ impl ContextListView {
         let _ = self.event_bus_tx.send(event).await;
     }
 
-    async fn handle_list_navigation(
+    async fn handle_keyboard(
         &self,
         event: Event,
         state: &AppState,
         view_state: &mut ContextListViewState,
-    ) -> Result<(), String> {
+    ) -> Option<KtxEvent> {
         let list_state = &view_state.list_state;
         let filtered_contexts = state.get_filtered_contexts();
-        match event {
-            Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) => match (code, modifiers) {
-                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                    let _ = self.send_event(KtxEvent::ListOneUp).await;
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                    let _ = self.send_event(KtxEvent::ListOneDown).await;
-                }
-                (KeyCode::PageUp, _) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                    let _ = self.send_event(KtxEvent::ListPageUp).await;
-                }
-                (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                    let _ = self.send_event(KtxEvent::ListPageDown).await;
-                }
-                (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
-                    if (code == KeyCode::Char('g') && view_state.remembered_g)
-                        || code == KeyCode::Home
-                    {
+        if let Some(event) = handle_list_navigation_keyboard_event(
+            event,
+            self.event_bus_tx.clone(),
+            &mut view_state.remembered_g,
+        )
+        .await
+        {
+            match event {
+                Event::Key(KeyEvent {
+                    code, modifiers, ..
+                }) => match (code, modifiers) {
+                    (KeyCode::Enter, _) => {
+                        if let Some(selected) = list_state.selected() {
+                            let name = filtered_contexts[selected].0.name.clone();
+                            self.send_event(KtxEvent::SetContext(name)).await;
+                        }
+                    }
+                    (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                        self.send_event(KtxEvent::PopView).await;
+                    }
+                    (KeyCode::Char('d'), _) => {
+                        if let Some(selected) = list_state.selected() {
+                            let _ = self
+                                .send_event(KtxEvent::DeleteContext(
+                                    filtered_contexts[selected].0.name.clone(),
+                                ))
+                                .await;
+                        }
+                    }
+                    (KeyCode::Char('t'), _) => {
+                        self.send_event(KtxEvent::TestConnections).await;
+                    }
+                    _ => {
                         view_state.remembered_g = false;
-                        self.send_event(KtxEvent::ListTop).await;
-                    } else {
-                        view_state.remembered_g = true;
                     }
-                }
-                (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
-                    self.send_event(KtxEvent::ListBottom).await;
-                }
-                (KeyCode::Enter, _) => {
-                    if let Some(selected) = list_state.selected() {
-                        let name = filtered_contexts[selected].0.name.clone();
-                        self.send_event(KtxEvent::SetContext(name)).await;
-                    }
-                }
-                (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
-                    self.send_event(KtxEvent::PopView).await;
-                }
-                (KeyCode::Char('d'), _) => {
-                    if let Some(selected) = list_state.selected() {
-                        let _ = self
-                            .send_event(KtxEvent::DeleteContext(
-                                filtered_contexts[selected].0.name.clone(),
-                            ))
-                            .await;
-                    }
-                }
-                (KeyCode::Char('t'), _) => {
-                    self.send_event(KtxEvent::TestConnections).await;
-                }
+                },
                 _ => {
-                    view_state.remembered_g = false;
+                    return Some(KtxEvent::TerminalEvent(event));
                 }
-            },
-            _ => {}
-        };
-        Ok(())
-    }
-
-    async fn handle_list_navigation_event(
-        &self,
-        event: KtxEvent,
-        state: &AppState,
-        view_state: &mut ContextListViewState,
-    ) -> Result<(), String> {
-        let filtered_contexts = state.get_filtered_contexts();
-        let list_state = &mut view_state.list_state;
-        match event {
-            KtxEvent::ListSelect(pos) => {
-                list_state.select(Some(pos));
-            }
-            KtxEvent::ListOneUp => {
-                if let Some(current_selection) = list_state.selected() {
-                    if current_selection > 0 {
-                        list_state.select(Some(current_selection - 1));
-                    }
-                }
-            }
-            KtxEvent::ListOneDown => {
-                if let Some(current_selection) = list_state.selected() {
-                    if current_selection < filtered_contexts.len() - 1 {
-                        list_state.select(Some(current_selection + 1));
-                    }
-                }
-            }
-            KtxEvent::ListPageUp => {
-                if let Some(current_selection) = list_state.selected() {
-                    if current_selection > 0 {
-                        let new_selection = current_selection.saturating_sub(10);
-                        list_state.select(Some(new_selection));
-                    }
-                }
-            }
-            KtxEvent::ListPageDown => {
-                if let Some(current_selection) = list_state.selected() {
-                    if current_selection < filtered_contexts.len() - 1 {
-                        let new_selection =
-                            usize::min(current_selection + 10, filtered_contexts.len() - 1);
-                        list_state.select(Some(new_selection));
-                    }
-                }
-            }
-            KtxEvent::ListTop => {
-                list_state.select(Some(0));
-            }
-            KtxEvent::ListBottom => {
-                list_state.select(Some(filtered_contexts.len().saturating_sub(1)));
-            }
-            _ => {}
-        };
-        Ok(())
+            };
+        }
+        None
     }
 
     async fn handle_app_event(
@@ -172,7 +105,7 @@ impl ContextListView {
         event: KtxEvent,
         state: &AppState,
         view_state: &mut ContextListViewState,
-    ) -> Result<(), String> {
+    ) -> Option<KtxEvent> {
         match event {
             KtxEvent::ListSelect(_)
             | KtxEvent::ListOneUp
@@ -181,13 +114,12 @@ impl ContextListView {
             | KtxEvent::ListPageDown
             | KtxEvent::ListTop
             | KtxEvent::ListBottom => {
-                let _ = self
-                    .handle_list_navigation_event(event, state, view_state)
-                    .await;
+                let filtered_contexts = state.get_filtered_contexts();
+                let list_state = &mut view_state.list_state;
+                handle_list_app_event(event, list_state, filtered_contexts.len()).await
             }
-            _ => {}
-        };
-        Ok(())
+            _ => Some(event),
+        }
     }
 
     fn render_context(
@@ -277,16 +209,11 @@ where
         event: KtxEvent,
         state: &AppState,
         view_state: &mut ViewState,
-    ) -> Result<(), String> {
+    ) -> Option<KtxEvent> {
         let view_state = ContextListViewState::from_view_state(view_state);
         match event {
-            KtxEvent::TerminalEvent(evt) => {
-                let _ = self.handle_list_navigation(evt, state, view_state).await;
-            }
-            _ => {
-                let _ = self.handle_app_event(event, state, view_state).await;
-            }
-        };
-        Ok(())
+            KtxEvent::TerminalEvent(evt) => self.handle_keyboard(evt, state, view_state).await,
+            _ => self.handle_app_event(event, state, view_state).await,
+        }
     }
 }
