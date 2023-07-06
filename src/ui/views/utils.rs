@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use tui::{
@@ -6,7 +8,7 @@ use tui::{
     widgets::{Block, Borders, List, ListItem, ListState},
 };
 
-use crate::ui::KtxEvent;
+use crate::ui::{app::HandleEventResult, KtxEvent};
 
 pub fn key_style(s: &str) -> Span<'static> {
     Span::styled(
@@ -51,7 +53,7 @@ pub async fn handle_list_navigation_keyboard_event(
     event: Event,
     event_bus: mpsc::Sender<KtxEvent>,
     g_mem: &mut bool,
-) -> Option<Event> {
+) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
     match event {
         Event::Key(KeyEvent {
             code, modifiers, ..
@@ -83,21 +85,27 @@ pub async fn handle_list_navigation_keyboard_event(
                 let _ = event_bus.send(KtxEvent::EnterFilterMode).await;
             }
             _ => {
-                return Some(event);
+                return Ok(Some(event));
             }
         },
         _ => {
-            return Some(event);
+            return Ok(Some(event));
         }
     };
-    None
+    Ok(None)
 }
 
 pub async fn handle_list_navigation_event(
     event: KtxEvent,
     list_state: &mut ListState,
     max_len: usize,
-) -> Option<KtxEvent> {
+) -> HandleEventResult {
+    // Hack: fixup list state if it's out of bounds
+    if let Some(current_selection) = list_state.selected() {
+        if current_selection >= max_len {
+            list_state.select(Some(max_len.saturating_sub(1)));
+        }
+    }
     match event {
         KtxEvent::ListSelect(pos) => {
             list_state.select(Some(pos));
@@ -139,8 +147,8 @@ pub async fn handle_list_navigation_event(
             list_state.select(Some(max_len.saturating_sub(1)));
         }
         _ => {
-            return Some(event);
+            return Ok(Some(event));
         }
     };
-    None
+    Ok(None)
 }

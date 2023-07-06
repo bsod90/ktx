@@ -13,20 +13,23 @@ use tui::{
     Frame,
 };
 
-use crate::ui::types::{KtxEvent, KubeContextStatus, ViewState};
-use crate::ui::views::ui_utils::{
+use crate::ui::views::utils::{
     action_style, handle_list_navigation_event, handle_list_navigation_keyboard_event, key_style,
+    styled_list,
+};
+use crate::ui::{
+    app::HandleEventResult,
+    types::{KtxEvent, KubeContextStatus, ViewState},
 };
 use crate::ui::{
     app::{AppState, AppView},
     types::CloudImportPath,
 };
 
-use super::ui_utils::styled_list;
-
 pub struct ContextListViewState {
     pub list_state: ListState,
     pub remembered_g: bool,
+    pub filter: String,
 }
 
 pub struct ContextListView {
@@ -41,6 +44,7 @@ impl ContextListView {
         let mut state = ContextListViewState {
             list_state: ListState::default(),
             remembered_g: false,
+            filter: "".to_string(),
         };
         state.list_state.select(Some(0));
         Self {
@@ -58,15 +62,15 @@ impl ContextListView {
         event: Event,
         state: &AppState,
         view_state: &mut ContextListViewState,
-    ) -> Option<KtxEvent> {
+    ) -> HandleEventResult {
         let list_state = &view_state.list_state;
-        let filtered_contexts = state.get_filtered_contexts();
+        let filtered_contexts = state.get_filtered_contexts(view_state.filter.as_str());
         if let Some(event) = handle_list_navigation_keyboard_event(
             event,
             self.event_bus_tx.clone(),
             &mut view_state.remembered_g,
         )
-        .await
+        .await?
         {
             match event {
                 Event::Key(KeyEvent {
@@ -113,11 +117,11 @@ impl ContextListView {
                 }
                 _ => {
                     view_state.remembered_g = false;
-                    return Some(KtxEvent::TerminalEvent(event));
+                    return Ok(Some(KtxEvent::TerminalEvent(event)));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     async fn handle_app_event(
@@ -125,8 +129,8 @@ impl ContextListView {
         event: KtxEvent,
         state: &AppState,
         view_state: &mut ContextListViewState,
-    ) -> Option<KtxEvent> {
-        let filtered_contexts = state.get_filtered_contexts();
+    ) -> HandleEventResult {
+        let filtered_contexts = state.get_filtered_contexts(view_state.filter.as_str());
         let list_state = &mut view_state.list_state;
         handle_list_navigation_event(event, list_state, filtered_contexts.len()).await
     }
@@ -176,6 +180,18 @@ where
         self.state.clone()
     }
 
+    async fn update_filter(&self, filter: String) {
+        let mut state = self.state.lock().await;
+        let mut state = ContextListViewState::from_view_state(&mut state);
+        state.filter = filter;
+    }
+
+    async fn get_filter(&self) -> String {
+        let mut state = self.state.lock().await;
+        let state = ContextListViewState::from_view_state(&mut state);
+        state.filter.clone()
+    }
+
     fn draw_top_bar(&self, _state: &AppState) -> Paragraph<'_> {
         Paragraph::new(Line::from(vec![
             key_style("jk"),
@@ -196,7 +212,7 @@ where
     fn draw(&self, f: &mut Frame<B>, area: Rect, state: &AppState, view_state: &mut ViewState) {
         let view_state = ContextListViewState::from_view_state(view_state);
         let items: Vec<ListItem> = state
-            .get_filtered_contexts()
+            .get_filtered_contexts(view_state.filter.as_str())
             .iter()
             .map(|c| self.render_context(c, state, &area))
             .collect();
@@ -205,11 +221,7 @@ where
         f.render_stateful_widget(list, area, &mut view_state.list_state);
     }
 
-    async fn handle_event(
-        &self,
-        event: KtxEvent,
-        state: &AppState
-    ) -> Option<KtxEvent> {
+    async fn handle_event(&self, event: KtxEvent, state: &AppState) -> HandleEventResult {
         let mut locked_state = self.state.lock().await;
         let view_state = ContextListViewState::from_view_state(&mut locked_state);
         match event {

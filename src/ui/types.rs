@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use crate::ui::views::confirmation::ConfirmationDialogViewState;
 use crate::ui::views::import::ImportViewState;
 use crate::ui::views::list::ContextListViewState;
@@ -16,11 +18,14 @@ pub enum RendererMessage {
     Stop,
 }
 
+// primary id, display name, optional secondary id
 #[derive(Debug, Clone)]
-pub struct CloudImportPath(Vec<(String, String)>);
+pub struct CloudImportPath(Vec<(String, String, Option<String>)>);
+
+pub type EmptyResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 impl CloudImportPath {
-    pub fn is_terminal(&self) -> bool {
+    pub fn is_full(&self) -> bool {
         if self.is_empty() {
             false
         } else if self.is_gcp() {
@@ -30,8 +35,22 @@ impl CloudImportPath {
             // AWS path: platform -> profile -> region -> cluster
             self.0.len() == 4
         } else if self.is_azure() {
-            // Azure path: platform -> subscription -> resource group -> cluster
-            self.0.len() == 4
+            // Azure path: platform -> subscription -> cluster
+            self.0.len() == 3
+        } else {
+            false
+        }
+    }
+
+    pub fn is_listing_clusters(&self) -> bool {
+        if self.is_empty() {
+            false
+        } else if self.is_gcp() {
+            self.0.len() == 2
+        } else if self.is_aws() {
+            self.0.len() == 3
+        } else if self.is_azure() {
+            self.0.len() == 2
         } else {
             false
         }
@@ -70,6 +89,10 @@ impl CloudImportPath {
         self.0[1].0.clone()
     }
 
+    pub fn get_gke_zone(&self) -> String {
+        self.0[2].2.clone().unwrap()
+    }
+
     pub fn has_aws_profile(&self) -> bool {
         self.is_aws() && self.0.len() > 1
     }
@@ -86,12 +109,8 @@ impl CloudImportPath {
         self.0[1].0.clone()
     }
 
-    pub fn has_azure_resource_group(&self) -> bool {
-        self.is_azure() && self.0.len() > 2
-    }
-
     pub fn get_azure_resource_group(&self) -> String {
-        self.0[2].0.clone()
+        self.0[2].2.clone().unwrap()
     }
 
     pub fn has_aws_region(&self) -> bool {
@@ -103,18 +122,26 @@ impl CloudImportPath {
     }
 
     pub fn get_cluster_id(&self) -> String {
-        self.0.last().unwrap().1.clone()
+        self.0.last().unwrap().0.clone()
     }
 
-    pub fn push_clone(&self, element: (String, String)) -> Self {
+    pub fn push_clone(&self, element: (String, String, Option<String>)) -> Self {
         let mut new_path = self.0.clone();
         new_path.push(element);
         Self(new_path)
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn get_platform(&self) -> String {
+        self.0[0].0.clone()
+    }
 }
 
-impl From<Vec<(String, String)>> for CloudImportPath {
-    fn from(path: Vec<(String, String)>) -> Self {
+impl From<Vec<(String, String, Option<String>)>> for CloudImportPath {
+    fn from(path: Vec<(String, String, Option<String>)>) -> Self {
         Self(path)
     }
 }
@@ -134,6 +161,9 @@ pub enum KtxEvent {
     ListPageDown,
     ListTop,
     ListBottom,
+    PushErrorMessage(String),
+    PushSuccessMessage(String),
+    PushInfoMessage(String),
     RefreshConfig,
     SetConnectivityStatus((String, KubeContextStatus)),
     ShowImportView(CloudImportPath),

@@ -20,7 +20,11 @@ use tui::style::{Color, Style};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::{backend::Backend, layout::Rect, Frame};
 
+use super::types::EmptyResult;
 use super::views::import::ImportView;
+
+pub type DynAppView<B> = Box<dyn AppView<B> + Send + Sync>;
+pub type HandleEventResult = Result<Option<KtxEvent>, Box<dyn Error + Send + Sync>>;
 
 #[async_trait]
 pub trait AppView<B>
@@ -29,33 +33,50 @@ where
 {
     fn draw(&self, f: &mut Frame<B>, area: Rect, state: &AppState, view_state: &mut ViewState);
     fn draw_top_bar(&self, state: &AppState) -> Paragraph<'_>;
-    async fn handle_event(&self, event: KtxEvent, state: &AppState) -> Option<KtxEvent>;
+    async fn handle_event(&self, event: KtxEvent, state: &AppState) -> HandleEventResult;
     fn get_state_mutex(&self) -> Arc<Mutex<ViewState>>;
+    async fn update_filter(&self, _filter: String) {}
+    async fn get_filter(&self) -> String {
+        "".to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum UiMessage {
+    Error(String),
+    Info(String),
+    Success(String),
 }
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub is_filter_on: bool,
-    pub filter: String,
     pub kubeconfig: Kubeconfig,
     pub kubeconfig_path: String,
     pub connectivity_status: std::collections::HashMap<String, KubeContextStatus>,
+    pub config_lock: Arc<Mutex<()>>,
+    last_message: Option<UiMessage>,
+    last_message_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct KtxApp<B: Backend + Send + Sync> {
     state: Arc<Mutex<AppState>>,
-    view_stack: Arc<Mutex<Vec<Box<dyn AppView<B> + Send + Sync>>>>,
+    view_stack: Arc<Mutex<Vec<DynAppView<B>>>>,
     event_bus_tx: mpsc::Sender<KtxEvent>,
     terminal: Mutex<tui::Terminal<B>>,
 }
 
 impl AppState {
-    pub fn get_filtered_contexts(&self) -> Vec<(NamedContext, KubeContextStatus)> {
+    pub fn get_filtered_contexts(&self, filter: &str) -> Vec<(NamedContext, KubeContextStatus)> {
         let kubeconfig = &self.kubeconfig;
         let connectivity_status = &self.connectivity_status;
         let mut filtered_contexts = Vec::new();
         for context in &kubeconfig.contexts {
-            if context.name.contains(&self.filter) {
+            if context
+                .name
+                .to_lowercase()
+                .contains(filter.to_lowercase().as_str())
+            {
                 let status = connectivity_status
                     .get(&context.name)
                     .unwrap_or(&KubeContextStatus::Unknown);
@@ -86,11 +107,13 @@ where
             Kubeconfig::read_from(&kubeconfig_path).expect("Unable to read kubeconfig");
         Self {
             state: Arc::new(Mutex::new(AppState {
-                filter: String::new(),
                 is_filter_on: false,
                 kubeconfig_path,
                 connectivity_status: std::collections::HashMap::new(),
                 kubeconfig,
+                last_message: None,
+                last_message_timestamp: None,
+                config_lock: Arc::new(Mutex::new(())),
             })),
             event_bus_tx,
             view_stack: Arc::new(Mutex::new(Vec::new())),
@@ -105,7 +128,7 @@ where
         )));
     }
 
-    async fn test_connections(&self, state: &AppState) {
+    async fn test_connections(&self, state: &AppState) -> EmptyResult {
         let kubeconfig = state.kubeconfig.clone();
         let contexts = state.kubeconfig.contexts.clone();
         let event_bus = self.event_bus_tx.clone();
@@ -138,7 +161,10 @@ where
                                 version.major, version.minor
                             )),
                         )),
-                        Err(_) => {
+                        Err(e) => {
+                            let _ = event_bus
+                                .send(KtxEvent::PushInfoMessage(e.to_string()))
+                                .await;
                             KtxEvent::SetConnectivityStatus((name, KubeContextStatus::Unhealthy))
                         }
                     };
@@ -153,45 +179,56 @@ where
                 .collect::<Vec<_>>()
                 .await;
         });
+        Ok(())
     }
 
-    async fn handle_filter_on_navigation(&self, code: KeyCode, state: &mut AppState) {
+    async fn handle_filter_on_navigation(
+        &self,
+        code: KeyCode,
+        view: &DynAppView<B>,
+    ) -> EmptyResult {
+        let mut current_filter = view.get_filter().await;
         match code {
             event::KeyCode::Char(c) => {
-                state.filter.push(c);
+                current_filter.push(c);
             }
             event::KeyCode::Backspace => {
-                state.filter.pop();
+                current_filter.pop();
             }
             event::KeyCode::Enter | event::KeyCode::Esc => {
                 let _ = self.event_bus_tx.send(KtxEvent::ExitFilterMode).await;
             }
             _ => {}
         };
+        view.update_filter(current_filter).await;
+        Ok(())
     }
 
-    async fn propagate_event(&self, event: KtxEvent, state: &mut AppState) -> Option<KtxEvent> {
+    async fn propagate_event(&self, event: KtxEvent, state: &mut AppState) -> HandleEventResult {
         let view_stack = self.view_stack.lock().await;
         let current_view = view_stack.last().unwrap();
         current_view.handle_event(event, state).await
     }
 
-    async fn handle_terminal_event(&self, event: Event, state: &mut AppState) {
+    async fn handle_terminal_event(&self, event: Event, state: &mut AppState) -> EmptyResult {
         // "Inversed" event handling order because filter is technically in focus and should
         // handle events before any other view
         if state.is_filter_on {
+            let view_stack = self.view_stack.lock().await;
+            let current_view = view_stack.last().unwrap();
             if let Event::Key(key_event) = event {
-                self.handle_filter_on_navigation(key_event.code, state)
-                    .await;
+                self.handle_filter_on_navigation(key_event.code, &current_view)
+                    .await?;
             }
         } else {
             self.propagate_event(KtxEvent::TerminalEvent(event), state)
-                .await;
-        }
+                .await?;
+        };
+        Ok(())
     }
 
-    async fn handle_app_event(&self, event: KtxEvent, state: &mut AppState) {
-        if let Some(event) = self.propagate_event(event, state).await {
+    async fn handle_app_event(&self, event: KtxEvent, state: &mut AppState) -> EmptyResult {
+        if let Some(event) = self.propagate_event(event, state).await? {
             match event {
                 KtxEvent::ExitFilterMode => {
                     state.is_filter_on = false;
@@ -200,7 +237,7 @@ where
                     state.is_filter_on = true;
                 }
                 KtxEvent::TestConnections => {
-                    self.test_connections(state).await;
+                    self.test_connections(state).await?;
                 }
                 KtxEvent::SetConnectivityStatus((name, status)) => {
                     state.connectivity_status.insert(name, status);
@@ -217,13 +254,25 @@ where
                     )));
                 }
                 KtxEvent::RefreshConfig => {
-                    state.kubeconfig = Kubeconfig::read_from(&state.kubeconfig_path)
-                        .expect("Unable to read kubeconfig");
+                    let _config_guard = state.config_lock.lock().await;
+                    state.kubeconfig = Kubeconfig::read_from(&state.kubeconfig_path)?;
+                }
+                KtxEvent::PushErrorMessage(error) => {
+                    state.last_message = Some(UiMessage::Error(error));
+                    state.last_message_timestamp = Some(chrono::Utc::now());
+                }
+                KtxEvent::PushInfoMessage(error) => {
+                    state.last_message = Some(UiMessage::Info(error));
+                    state.last_message_timestamp = Some(chrono::Utc::now());
+                }
+                KtxEvent::PushSuccessMessage(error) => {
+                    state.last_message = Some(UiMessage::Success(error));
+                    state.last_message_timestamp = Some(chrono::Utc::now());
                 }
                 KtxEvent::ShowImportView(path) => {
                     let mut view_stack = self.view_stack.lock().await;
                     let import_view = ImportView::new::<B>(self.event_bus_tx.clone(), path);
-                    import_view.load_options().await;
+                    import_view.load_options().await?;
                     view_stack.push(Box::new(import_view));
                 }
                 KtxEvent::PopView | KtxEvent::DialogReject | KtxEvent::DialogConfirm => {
@@ -236,15 +285,16 @@ where
                 }
                 KtxEvent::DeleteContextConfirm(name) => {
                     state.kubeconfig.contexts.retain(|c| c.name != name);
-                    self.write_kubeconfig(state).await.unwrap();
+                    self.write_kubeconfig(state).await?;
                 }
                 KtxEvent::SetContext(name) => {
                     state.kubeconfig.current_context = Some(name);
-                    self.write_kubeconfig(state).await.unwrap();
+                    self.write_kubeconfig(state).await?;
                 }
                 _ => {}
             };
         };
+        Ok(())
     }
 
     pub async fn start_renderer(&self, mut rx: mpsc::Receiver<RendererMessage>) -> () {
@@ -264,12 +314,20 @@ where
                     let mut state = self.state.lock().await;
                     let view_stack = self.view_stack.lock().await;
                     let current_view = view_stack.last().unwrap();
+                    let view_filter = current_view.get_filter().await;
                     let state_mutex = current_view.get_state_mutex();
                     let mut view_state = state_mutex.lock().await;
                     let mut terminal = self.terminal.lock().await;
                     terminal
                         .draw(move |f| {
-                            self.draw(f, f.size(), &mut state, current_view, &mut view_state)
+                            self.draw(
+                                f,
+                                f.size(),
+                                &mut state,
+                                current_view,
+                                &mut view_state,
+                                view_filter,
+                            )
                         })
                         .expect("Unable to draw terminal");
                 }
@@ -285,10 +343,11 @@ where
         f: &mut Frame<B>,
         area: Rect,
         state: &mut AppState,
-        current_view: &Box<dyn AppView<B> + Send + Sync>,
+        current_view: &DynAppView<B>,
+        view_filter: String,
     ) {
         if state.is_filter_on {
-            let filter_input = Paragraph::new(state.filter.as_str())
+            let filter_input = Paragraph::new(view_filter)
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Filter"))
                 .wrap(Wrap { trim: true });
@@ -309,24 +368,59 @@ where
         f: &mut Frame<B>,
         _area: Rect,
         state: &mut AppState,
-        current_view: &Box<dyn AppView<B> + Send + Sync>,
+        current_view: &DynAppView<B>,
         view_state: &mut ViewState,
+        view_filter: String,
     ) {
         let size = f.size();
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
+            .constraints(
+                [
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                    Constraint::Length(2),
+                ]
+                .as_ref(),
+            )
             .split(size);
-        self.draw_top_bar(f, layout[0], state, current_view);
+        self.draw_top_bar(f, layout[0], state, current_view, view_filter);
         current_view.draw(f, layout[1], state, view_state);
+        self.draw_error_bar(f, layout[2], state);
+    }
+
+    pub fn draw_error_bar(&self, f: &mut Frame<B>, area: Rect, state: &mut AppState) {
+        if let (Some(msg), Some(ts)) = (&state.last_message, &state.last_message_timestamp) {
+            if *ts + chrono::Duration::seconds(6) > chrono::Utc::now() {
+                let error_bar = match msg {
+                    UiMessage::Error(msg) => {
+                        Paragraph::new(msg.as_str()).style(Style::default().fg(Color::Red))
+                    }
+                    UiMessage::Info(msg) => {
+                        Paragraph::new(msg.as_str()).style(Style::default().fg(Color::DarkGray))
+                    }
+                    UiMessage::Success(msg) => {
+                        Paragraph::new(msg.as_str()).style(Style::default().fg(Color::Green))
+                    }
+                }
+                .wrap(Wrap { trim: true });
+                f.render_widget(error_bar, area);
+            }
+        }
     }
 
     pub async fn handle_event(&self, event: KtxEvent) {
         let mut state = self.state.lock().await;
-        match event {
+        let result = match event {
             KtxEvent::TerminalEvent(evt) => self.handle_terminal_event(evt, &mut state).await,
             _ => self.handle_app_event(event, &mut state).await,
+        };
+        if let Err(e) = result {
+            let _ = self
+                .event_bus_tx
+                .send(KtxEvent::PushErrorMessage(e.to_string()))
+                .await;
         }
     }
 
@@ -339,7 +433,8 @@ where
         disable_raw_mode().expect("Failed to disable raw mode");
     }
 
-    async fn write_kubeconfig(&self, state: &mut AppState) -> Result<(), Box<dyn Error>> {
+    async fn write_kubeconfig(&self, state: &mut AppState) -> EmptyResult {
+        let _config_guard = state.config_lock.lock().await;
         let serialized_kubeconfig = serde_yaml::to_string(&state.kubeconfig)?;
         let path = Path::new(state.kubeconfig_path.as_str());
         let mut file = fs::File::create(&path).await?;

@@ -1,9 +1,7 @@
 use clap::{Arg, Command};
 use crossterm::event;
-// use env_logger::{self, Builder};
 use futures::StreamExt;
-use log::{error, LevelFilter};
-use std::{io, io::Write, sync::Arc};
+use std::{io, sync::Arc};
 use tokio::sync::mpsc;
 use tui::{backend::CrosstermBackend, Terminal};
 
@@ -13,18 +11,6 @@ use ui::{KtxApp, KtxEvent, RendererMessage};
 
 #[tokio::main]
 async fn main() {
-    // Builder::new()
-    //     .format(|buf, record| {
-    //         writeln!(
-    //             buf,
-    //             "{} [{}] - {}",
-    //             chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"),
-    //             record.level(),
-    //             record.args()
-    //         )
-    //     })
-    //     .filter(None, LevelFilter::Info)
-    //     .init();
     let matches = Command::new("ktx")
         .version("0.1.0")
         .author("Maksim Leanovich <lm.bsod@gmail.com>")

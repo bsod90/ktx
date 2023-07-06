@@ -12,9 +12,9 @@ use tui::{
     Frame,
 };
 
-use crate::ui::{app::AppState, types::ViewState, AppView, KtxEvent};
+use crate::ui::{app::{AppState, HandleEventResult}, types::ViewState, AppView, KtxEvent};
 
-use super::ui_utils::{action_style, key_style, styled_button};
+use super::utils::{action_style, key_style, styled_button};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ConfirmationDialogSelection {
@@ -148,7 +148,7 @@ where
         f.render_widget(buttons, layout[1]);
     }
 
-    async fn handle_event(&self, event: KtxEvent, _state: &AppState) -> Option<KtxEvent> {
+    async fn handle_event(&self, event: KtxEvent, _state: &AppState) -> HandleEventResult {
         let mut locked_state = self.state.lock().await;
         let view_state = ConfirmationDialogViewState::from_view_state(&mut locked_state);
         match event {
@@ -190,17 +190,17 @@ where
                         self.reject(view_state).await;
                     }
                     _ => {
-                        return Some(KtxEvent::TerminalEvent(evt));
+                        return Ok(Some(KtxEvent::TerminalEvent(evt)));
                     }
                 },
                 _ => {
-                    return Some(KtxEvent::TerminalEvent(evt));
+                    return Ok(Some(KtxEvent::TerminalEvent(evt)));
                 }
             },
             _ => {
-                return Some(event);
+                return Ok(Some(event));
             }
         };
-        None
+        Ok(None)
     }
 }
