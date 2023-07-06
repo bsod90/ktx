@@ -148,13 +148,9 @@ where
         f.render_widget(buttons, layout[1]);
     }
 
-    async fn handle_event(
-        &self,
-        event: KtxEvent,
-        _state: &AppState,
-        view_state: &mut ViewState,
-    ) -> Option<KtxEvent> {
-        let view_state = ConfirmationDialogViewState::from_view_state(view_state);
+    async fn handle_event(&self, event: KtxEvent, _state: &AppState) -> Option<KtxEvent> {
+        let mut locked_state = self.state.lock().await;
+        let view_state = ConfirmationDialogViewState::from_view_state(&mut locked_state);
         match event {
             KtxEvent::TerminalEvent(evt) => match evt {
                 Event::Key(KeyEvent {

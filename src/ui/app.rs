@@ -3,7 +3,7 @@ use crate::ui::views::confirmation::ConfirmationDialogView;
 use crate::ui::views::list::ContextListView;
 use crate::ui::{KtxEvent, KubeContextStatus, RendererMessage};
 use async_trait::async_trait;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use futures::stream::StreamExt;
 use kube::config::{KubeConfigOptions, Kubeconfig, NamedContext};
@@ -20,6 +20,8 @@ use tui::style::{Color, Style};
 use tui::widgets::{Block, Borders, Paragraph, Wrap};
 use tui::{backend::Backend, layout::Rect, Frame};
 
+use super::views::import::ImportView;
+
 #[async_trait]
 pub trait AppView<B>
 where
@@ -27,12 +29,7 @@ where
 {
     fn draw(&self, f: &mut Frame<B>, area: Rect, state: &AppState, view_state: &mut ViewState);
     fn draw_top_bar(&self, state: &AppState) -> Paragraph<'_>;
-    async fn handle_event(
-        &self,
-        event: KtxEvent,
-        state: &AppState,
-        view_state: &mut ViewState,
-    ) -> Option<KtxEvent>;
+    async fn handle_event(&self, event: KtxEvent, state: &AppState) -> Option<KtxEvent>;
     fn get_state_mutex(&self) -> Arc<Mutex<ViewState>>;
 }
 
@@ -176,30 +173,20 @@ where
     async fn propagate_event(&self, event: KtxEvent, state: &mut AppState) -> Option<KtxEvent> {
         let view_stack = self.view_stack.lock().await;
         let current_view = view_stack.last().unwrap();
-        let view_state_mutex = current_view.get_state_mutex();
-        let mut current_view_state = view_state_mutex.lock().await;
-        current_view
-            .handle_event(event, state, &mut current_view_state)
-            .await
+        current_view.handle_event(event, state).await
     }
 
     async fn handle_terminal_event(&self, event: Event, state: &mut AppState) {
-        match event {
-            // "Inversed" event handling order because filter is technically in focus and should
-            // handle events before any other view
-            Event::Key(KeyEvent { code, .. }) if state.is_filter_on => {
-                self.handle_filter_on_navigation(code, state).await;
-            }
-            Event::Key(KeyEvent {
-                code: event::KeyCode::Char('/'),
-                ..
-            }) if !state.is_filter_on => {
-                let _ = self.event_bus_tx.send(KtxEvent::EnterFilterMode).await;
-            }
-            _ => {
-                self.propagate_event(KtxEvent::TerminalEvent(event), state)
+        // "Inversed" event handling order because filter is technically in focus and should
+        // handle events before any other view
+        if state.is_filter_on {
+            if let Event::Key(key_event) = event {
+                self.handle_filter_on_navigation(key_event.code, state)
                     .await;
             }
+        } else {
+            self.propagate_event(KtxEvent::TerminalEvent(event), state)
+                .await;
         }
     }
 
@@ -228,6 +215,16 @@ where
                         ),
                         KtxEvent::DeleteContextConfirm(name),
                     )));
+                }
+                KtxEvent::RefreshConfig => {
+                    state.kubeconfig = Kubeconfig::read_from(&state.kubeconfig_path)
+                        .expect("Unable to read kubeconfig");
+                }
+                KtxEvent::ShowImportView(path) => {
+                    let mut view_stack = self.view_stack.lock().await;
+                    let import_view = ImportView::new::<B>(self.event_bus_tx.clone(), path);
+                    import_view.load_options().await;
+                    view_stack.push(Box::new(import_view));
                 }
                 KtxEvent::PopView | KtxEvent::DialogReject | KtxEvent::DialogConfirm => {
                     let mut view_stack = self.view_stack.lock().await;

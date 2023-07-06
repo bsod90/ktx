@@ -733,6 +733,7 @@ dependencies = [
  "log",
  "ratatui",
  "serde",
+ "serde_json",
  "serde_yaml",
  "shellexpand",
  "tokio",

@@ -9,15 +9,20 @@ use tui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{ListItem, ListState, Paragraph},
     Frame,
 };
 
-use crate::ui::app::{AppState, AppView};
 use crate::ui::types::{KtxEvent, KubeContextStatus, ViewState};
 use crate::ui::views::ui_utils::{
-    action_style, handle_list_app_event, handle_list_navigation_keyboard_event, key_style,
+    action_style, handle_list_navigation_event, handle_list_navigation_keyboard_event, key_style,
 };
+use crate::ui::{
+    app::{AppState, AppView},
+    types::CloudImportPath,
+};
+
+use super::ui_utils::styled_list;
 
 pub struct ContextListViewState {
     pub list_state: ListState,
@@ -65,37 +70,52 @@ impl ContextListView {
         {
             match event {
                 Event::Key(KeyEvent {
-                    code, modifiers, ..
-                }) => match (code, modifiers) {
-                    (KeyCode::Enter, _) => {
-                        if let Some(selected) = list_state.selected() {
-                            let name = filtered_contexts[selected].0.name.clone();
-                            self.send_event(KtxEvent::SetContext(name)).await;
-                        }
-                    }
-                    (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
-                        self.send_event(KtxEvent::PopView).await;
-                    }
-                    (KeyCode::Char('d'), _) => {
-                        if let Some(selected) = list_state.selected() {
-                            let _ = self
-                                .send_event(KtxEvent::DeleteContext(
-                                    filtered_contexts[selected].0.name.clone(),
-                                ))
-                                .await;
-                        }
-                    }
-                    (KeyCode::Char('t'), _) => {
-                        self.send_event(KtxEvent::TestConnections).await;
-                    }
-                    _ => {
-                        view_state.remembered_g = false;
-                    }
-                },
+                    code: KeyCode::Enter,
+                    ..
+                }) if list_state.selected().is_some() => {
+                    let name = filtered_contexts[list_state.selected().unwrap()]
+                        .0
+                        .name
+                        .clone();
+                    self.send_event(KtxEvent::SetContext(name)).await;
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Esc | KeyCode::Char('q'),
+                    ..
+                }) => {
+                    self.send_event(KtxEvent::PopView).await;
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('d'),
+                    ..
+                }) if list_state.selected().is_some() => {
+                    let _ = self
+                        .send_event(KtxEvent::DeleteContext(
+                            filtered_contexts[list_state.selected().unwrap()]
+                                .0
+                                .name
+                                .clone(),
+                        ))
+                        .await;
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('t'),
+                    ..
+                }) => {
+                    self.send_event(KtxEvent::TestConnections).await;
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('i'),
+                    ..
+                }) => {
+                    self.send_event(KtxEvent::ShowImportView(CloudImportPath::from(vec![])))
+                        .await;
+                }
                 _ => {
+                    view_state.remembered_g = false;
                     return Some(KtxEvent::TerminalEvent(event));
                 }
-            };
+            }
         }
         None
     }
@@ -106,20 +126,9 @@ impl ContextListView {
         state: &AppState,
         view_state: &mut ContextListViewState,
     ) -> Option<KtxEvent> {
-        match event {
-            KtxEvent::ListSelect(_)
-            | KtxEvent::ListOneUp
-            | KtxEvent::ListOneDown
-            | KtxEvent::ListPageUp
-            | KtxEvent::ListPageDown
-            | KtxEvent::ListTop
-            | KtxEvent::ListBottom => {
-                let filtered_contexts = state.get_filtered_contexts();
-                let list_state = &mut view_state.list_state;
-                handle_list_app_event(event, list_state, filtered_contexts.len()).await
-            }
-            _ => Some(event),
-        }
+        let filtered_contexts = state.get_filtered_contexts();
+        let list_state = &mut view_state.list_state;
+        handle_list_navigation_event(event, list_state, filtered_contexts.len()).await
     }
 
     fn render_context(
@@ -192,25 +201,17 @@ where
             .map(|c| self.render_context(c, state, &area))
             .collect();
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Contexts"))
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray),
-            )
-            .highlight_symbol("> ");
-
+        let list = styled_list("Kubernetes config contexts", items);
         f.render_stateful_widget(list, area, &mut view_state.list_state);
     }
 
     async fn handle_event(
         &self,
         event: KtxEvent,
-        state: &AppState,
-        view_state: &mut ViewState,
+        state: &AppState
     ) -> Option<KtxEvent> {
-        let view_state = ContextListViewState::from_view_state(view_state);
+        let mut locked_state = self.state.lock().await;
+        let view_state = ContextListViewState::from_view_state(&mut locked_state);
         match event {
             KtxEvent::TerminalEvent(evt) => self.handle_keyboard(evt, state, view_state).await,
             _ => self.handle_app_event(event, state, view_state).await,

@@ -2,7 +2,8 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use tui::{
     style::{Color, Modifier, Style},
-    text::Span, widgets::ListState,
+    text::Span,
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
 use crate::ui::KtxEvent;
@@ -29,6 +30,21 @@ pub fn styled_button(label: &str, selected: bool) -> Span<'static> {
         Style::default().fg(Color::Gray)
     };
     Span::styled(label.to_string(), style)
+}
+
+pub fn styled_list<'a>(label: &str, items: Vec<ListItem<'a>>) -> List<'a> {
+    List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(label.to_string()),
+        )
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray),
+        )
+        .highlight_symbol("> ")
 }
 
 pub async fn handle_list_navigation_keyboard_event(
@@ -63,6 +79,9 @@ pub async fn handle_list_navigation_keyboard_event(
             (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
                 let _ = event_bus.send(KtxEvent::ListBottom).await;
             }
+            (KeyCode::Char('/'), _) => {
+                let _ = event_bus.send(KtxEvent::EnterFilterMode).await;
+            }
             _ => {
                 return Some(event);
             }
@@ -74,7 +93,7 @@ pub async fn handle_list_navigation_keyboard_event(
     None
 }
 
-pub async fn handle_list_app_event(
+pub async fn handle_list_navigation_event(
     event: KtxEvent,
     list_state: &mut ListState,
     max_len: usize,
