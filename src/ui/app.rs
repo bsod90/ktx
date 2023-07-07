@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use futures::stream::StreamExt;
+use k8s_openapi::apimachinery::pkg::version::Info;
 use kube::config::{KubeConfigOptions, Kubeconfig, NamedContext};
 use kube::{Client, Config};
 use std::error::Error;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +40,17 @@ where
     async fn update_filter(&self, _filter: String) {}
     async fn get_filter(&self) -> String {
         "".to_string()
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionError {}
+
+impl Error for ConnectionError {}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Connection is Unhealthy")
     }
 }
 
@@ -148,9 +161,9 @@ where
                     let status = match async {
                         let config = Config::from_custom_kubeconfig(kubeconfig.clone(), &options)
                             .await
-                            .unwrap();
+                            .map_err(|_| ConnectionError {})?;
                         let client = Client::try_from(config)?;
-                        client.apiserver_version().await
+                        Ok::<Info, Box<dyn Error + Sync + Send>>(client.apiserver_version().await?)
                     }
                     .await
                     {
