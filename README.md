@@ -1,9 +1,9 @@
 # ktx
 Ktx is a lightweight terminal-ui utility for editing the kubectl config
 
-If you work with a large infrastructure where you have to jump between clusters a lot, ktx may make your life a little bit easier by helping you to
+If you work with a large infrastructure where you have to jump between clusters a lot, ktx may make your life a little bit easier by helping you to:
 - quickly search and switch contexts in your ~/.kube/config
-- test and remove stale context
+- test and remove stale contexts
 - discover GKE/EKS/AKS clusters and quickly import credentials
 
 
