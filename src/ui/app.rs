@@ -444,6 +444,7 @@ where
             .clear()
             .expect("Failed to clear terminal");
         disable_raw_mode().expect("Failed to disable raw mode");
+        self.terminal.lock().await.show_cursor().expect("Failed to show cursor");
     }
 
     async fn write_kubeconfig(&self, state: &mut AppState) -> EmptyResult {

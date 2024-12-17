@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use crossterm::event;
+use crossterm::{event, execute};
 use futures::StreamExt;
 use std::{io, sync::Arc};
 use tokio::sync::mpsc;
@@ -30,9 +30,12 @@ async fn main() {
         .unwrap_or(&default_config)
         .clone();
 
-    let stdout = io::stdout();
+    let mut stdout = io::stdout();
+    execute!(stdout, crossterm::terminal::EnterAlternateScreen)
+        .expect("Failed to enter alternate screen");
     let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend).expect("Failed to create terminal");
+    let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
+    terminal.clear().unwrap();
     let (renderer_tx, renderer_rx) = mpsc::channel(1024);
     let (event_bus_tx, mut event_bus_rx) = mpsc::channel(1024);
     let app = Arc::new(KtxApp::new(config_path.clone(), terminal, event_bus_tx));
